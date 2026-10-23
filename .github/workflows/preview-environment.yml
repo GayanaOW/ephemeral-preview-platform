@@ -1,0 +1,55 @@
+name: Ephemeral Preview Environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  deploy-preview:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create local K8s Cluster (Kind)
+        uses: helm/kind-action@v1.8.0
+        with:
+          cluster_name: preview-cluster
+
+      - name: Build and Load Docker Image
+        run: |
+          docker build -t preview-app:pr-${{ github.event.pull_request.number }} ./app
+          kind load docker-image preview-app:pr-${{ github.event.pull_request.number }} --name preview-cluster
+
+      - name: Deploy Ephemeral Environment via Helm
+        run: |
+          helm upgrade --install pr-${{ github.event.pull_request.number }} ./helm/preview-env \
+            --set image.repository=preview-app \
+            --set image.tag=pr-${{ github.event.pull_request.number }} \
+            --set env.environment=pr-${{ github.event.pull_request.number }} \
+            --set env.version=${{ github.sha }}
+
+      - name: Verify Deployment Health
+        run: |
+          kubectl rollout status deployment/pr-${{ github.event.pull_request.number }}-app --timeout=60s
+          kubectl get pods -l app=pr-${{ github.event.pull_request.number }}
+
+  destroy-preview:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create local K8s Cluster (Kind)
+        uses: helm/kind-action@v1.8.0
+        with:
+          cluster_name: preview-cluster
+
+      - name: Teardown Ephemeral Environment
+        run: |
+          helm uninstall pr-${{ github.event.pull_request.number }} || true
